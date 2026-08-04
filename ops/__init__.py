@@ -4,7 +4,8 @@ from .add_camera import AddCamera
 from .adjust_camera_lens import AdjustCameraLens
 from .preview_camera import PreviewCamera
 from .snapshot import Snapshot
-from .switch_camera import SwitchCamera
+from .switch_camera import SwitchCamera, SwitchCameraMenu
+from .toggle_lock_camera import ToggleLockCamera
 from . import motion
 register_class, unregister_class = bpy.utils.register_classes_factory((
     AddCamera,
@@ -13,6 +14,8 @@ register_class, unregister_class = bpy.utils.register_classes_factory((
 
     Snapshot,
     SwitchCamera,
+    SwitchCameraMenu,
+    ToggleLockCamera,
 ))
 
 

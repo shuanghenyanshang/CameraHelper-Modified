@@ -21,3 +21,18 @@ class SwitchCamera(bpy.types.Operator):
                 import traceback
                 traceback.print_exc()
         return {"FINISHED"}
+
+
+class SwitchCameraMenu(bpy.types.Operator):
+    bl_idname = 'camhp.switch_camera_menu'
+    bl_label = 'Switch Camera Menu'
+    bl_description = '切换相机'
+
+    @classmethod
+    def poll(cls, context):
+        return context.area and context.area.type == 'VIEW_3D'
+
+    def invoke(self, context, event):
+        from ..ui.menu import CAMERA_HELPER_MT_Switch_Camera
+        bpy.ops.wm.call_menu(name=CAMERA_HELPER_MT_Switch_Camera.__name__)
+        return {"FINISHED"}

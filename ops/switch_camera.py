@@ -13,4 +13,11 @@ class SwitchCamera(bpy.types.Operator):
     def invoke(self, context, event):
         if camera := getattr(context, "camera", None):
             context.space_data.camera = camera
+            context.space_data.region_3d.view_perspective = 'CAMERA'
+            context.scene.camera = camera
+            try:
+                bpy.ops.view3d.view_center_camera()
+            except Exception:
+                import traceback
+                traceback.print_exc()
         return {"FINISHED"}

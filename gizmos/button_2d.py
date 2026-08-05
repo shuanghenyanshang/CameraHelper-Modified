@@ -1,6 +1,7 @@
 import bpy
 
 from .public_gizmo import PublicGizmo
+from .panel_collapse import BUTTON_COLUMN_MARGIN
 from ..camera_thumbnails import CameraThumbnails
 from ..utils.gizmo import offset_2d_gizmo
 
@@ -94,6 +95,11 @@ class Button2DGizmos(bpy.types.GizmoGroup, Gizmos, PublicGizmo):
         for i, gz in enumerate(self.gizmos):
             gz.hide = True
 
+        # 面板折叠：隐藏全部按钮（折叠按钮由 panel_collapse.py 负责）
+        if not getattr(context.scene, "camhp_show_panel", True):
+            context.area.tag_redraw()
+            return
+
         region_3d = context.space_data.region_3d
         view_perspective = region_3d.view_perspective
 
@@ -117,7 +123,8 @@ class Button2DGizmos(bpy.types.GizmoGroup, Gizmos, PublicGizmo):
         for i, gz in enumerate(gizmos):
             if gz is None:
                 continue
-            offset_2d_gizmo(context, gz, i)
+            # margin：整列左移，给右侧折叠按钮（贴视窗右边缘）留出间距避免误触
+            offset_2d_gizmo(context, gz, i, margin=BUTTON_COLUMN_MARGIN)
             gz.hide = False
 
         if hasattr(self, "gz_lock_cam"):

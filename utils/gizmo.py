@@ -1,15 +1,15 @@
 import bpy
 
 
-def offset_2d_gizmo(context, gizmo, offset_step):
+def offset_2d_gizmo(context, gizmo, offset_step, margin=0):
     # ui scale
     ui_scale = bpy.context.preferences.system.dpi * (1 / 72)
     region = context.region
 
     step = 30 * ui_scale
     icon_scale = (80 * 0.35) / 2  # 14
-    # 从屏幕右侧起
-    start_x = region.width - (icon_scale * ui_scale + step) / 2
+    # 从屏幕右侧起（margin：整体左移量，用于给右侧折叠按钮留出间距）
+    start_x = region.width - (icon_scale * ui_scale + step) / 2 - margin
     start_y = region.height
 
     # 检查是否启用区域重叠，若启用则加上宽度以符合侧面板移动

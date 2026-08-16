@@ -128,7 +128,24 @@ class Button2DGizmos(bpy.types.GizmoGroup, Gizmos, PublicGizmo):
             gz.hide = False
 
         if hasattr(self, "gz_lock_cam"):
-            if context.space_data.lock_camera:
+            # 🔒 锁定保护（2026-08-17 集成视口代理相机）：代理相机视图 + 合成器生效 +
+            # 渲染结果窗口打开时，锁定按钮 tooltip 切换为警告文案（Gizmo 无 tooltip 属性，
+            # 悬停提示来自绑定 operator 的 bl_description，故切换 target operator），
+            # 点击也只警告不切换锁定；按钮转琥珀色警示
+            from ..ops.viewport_proxy import lock_blocked, VIEWPORT_PROXY_OT_lock_blocked_hint
+            from ..ops.toggle_lock_camera import ToggleLockCamera
+            blocked = lock_blocked()
+            prev = getattr(self, "_lock_blocked_state", None)
+            if blocked != prev:
+                self.gz_lock_cam.target_set_operator(
+                    VIEWPORT_PROXY_OT_lock_blocked_hint.bl_idname if blocked
+                    else ToggleLockCamera.bl_idname)
+                self._lock_blocked_state = blocked
+            if blocked:
+                self.gz_lock_cam.color = 0.75, 0.55, 0.1
+                self.gz_lock_cam.color_highlight = 0.95, 0.75, 0.25
+                self.gz_lock_cam.alpha = 1.0
+            elif context.space_data.lock_camera:
                 self.gz_lock_cam.color = 0.5, 0.1, 0.1
                 self.gz_lock_cam.color_highlight = 0.7, 0.2, 0.2
                 self.gz_lock_cam.alpha = 1.0
@@ -143,7 +160,12 @@ class Button2DGizmos(bpy.types.GizmoGroup, Gizmos, PublicGizmo):
         CameraThumbnails.update_2d_button_color(context, self.gz_cam_pv)
 
         if hasattr(self, "gz_lock_cam"):
-            if context.space_data.lock_camera:
+            from ..ops.viewport_proxy import lock_blocked
+            if lock_blocked():
+                self.gz_lock_cam.color = 0.75, 0.55, 0.1
+                self.gz_lock_cam.color_highlight = 0.95, 0.75, 0.25
+                self.gz_lock_cam.alpha = 1.0
+            elif context.space_data.lock_camera:
                 self.gz_lock_cam.color = 0.5, 0.1, 0.1
                 self.gz_lock_cam.color_highlight = 0.7, 0.2, 0.2
                 self.gz_lock_cam.alpha = 1.0

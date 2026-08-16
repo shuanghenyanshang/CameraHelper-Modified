@@ -13,6 +13,10 @@ class CAMERA_HELPER_MT_Switch_Camera(bpy.types.Menu):
         for i, obj in enumerate(bpy.data.objects):
             if obj.type != "CAMERA":
                 continue
+            # 隐藏视口代理相机（viewport_proxy_camera 扩展的 __ProxyCamera，TAG 标记），
+            # 避免用户在切换菜单中误选代理相机（本地修改，2026-08-16）
+            if obj.get("viewport_proxy_camera"):
+                continue
             name = obj.name
             if obj is context.scene.camera:
                 icon = "VIEW_CAMERA"

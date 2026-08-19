@@ -486,15 +486,17 @@ def sync(scn, force=False):
         bpy.context.view_layer.update()
 
 
-def acquire(scn):
+def acquire(scn, area=None):
     """接管：记录用户状态 → 创建特殊视口相机作为代理 → 原生 lock_camera。
 
     之后相机矩阵由 Blender 原生 lock_camera（C 层）在视口导航时直接驱动，
     零 Python 同步开销、零滞后（解决轮询/每帧 Python 同步卡顿）。
+    area 参数：手动创建代理相机（Shift+左键）时传入按钮所在 area，
+    避免多视口下 find_view3d 误选第一个视口。
     """
     if state['active']:
         return
-    area = find_view3d()
+    area = area or find_view3d()
     if not area:
         return
     v3d = area.spaces[0]

@@ -24,7 +24,7 @@ def fit_camera_frame(scn, region, rv3d):
 
 
 class AddCamera(bpy.types.Operator):
-    """Add View Camera\nCtrl Left Click: Add Motion Camera"""
+    """Add View Camera\nCtrl Left Click: Add Motion Camera\nShift Left Click: Add Proxy Camera"""
     bl_idname = get_operator_bl_idname("add_camera")
     bl_label = 'Add View Camera'
     bl_options = {'REGISTER', 'UNDO'}
@@ -34,6 +34,9 @@ class AddCamera(bpy.types.Operator):
         return context.area and context.area.type == 'VIEW_3D'
 
     def invoke(self, context, event):
+        # Shift+左键：创建代理相机（视口=相机=渲染；误删 __ProxyCamera 后的手动恢复手段）
+        if event.shift:
+            return self._create_proxy_camera(context)
         has_camera = any(o.type == 'CAMERA' for o in context.scene.objects)
         if not has_camera and event.ctrl:
             return self.execute(context)
@@ -43,6 +46,34 @@ class AddCamera(bpy.types.Operator):
             return {'FINISHED'}
         else:
             return self.execute(context)
+
+    def _create_proxy_camera(self, context):
+        from .viewport_proxy import acquire, create_proxy_from_view_camera, state
+
+        scn = context.scene
+        area = context.area
+        v3d = context.space_data
+        rv3d = v3d.region_3d if v3d else None
+        if rv3d is None or not rv3d.is_perspective:
+            self.report({'WARNING'}, "代理相机需在透视视口下创建（正交视口不支持接管）")
+            return {'CANCELLED'}
+        if state['active']:
+            self.report({'INFO'}, "视口代理相机已在接管中")
+            return {'FINISHED'}
+        preview = (getattr(scn, 'proxy_camera_enabled', False) and
+                   v3d.shading.type == 'RENDERED' and
+                   v3d.shading.use_compositor == 'ALWAYS')
+        if preview:
+            # 满足接管条件 → 完整接管（创建代理 + 设 scene.camera + 相机视图 + lock_camera）
+            acquire(scn, area)
+        else:
+            # 未满足接管条件（如自由视口非渲染模式）→ 仅创建代理相机并进入其相机视图，
+            # 切换条件满足后由 tick 状态机自动接管
+            proxy = create_proxy_from_view_camera(scn, area)
+            if proxy is None:
+                self.report({'ERROR'}, "代理相机创建失败")
+                return {'CANCELLED'}
+        return {'FINISHED'}
 
     def execute(self, context):
         region_3d = context.space_data.region_3d

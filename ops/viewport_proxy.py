@@ -4,15 +4,17 @@
 NPR 效果在自由视口下与相机视图一致，无需任何 C++ 改动。
 
 原理（numpy 已验证，见 blender-npr-operations SKILL §11.0）：
-  - 视口透视 winmat 由 BKE_camera_params_from_view3d(zoom=2.0) 生成；
-  - Camera Info 官方路径 BKE_camera_params_from_object(zoom=1.0)；
-  - 两者相等 ⟺ 代理相机 lens = v3d->lens / 2，matrix_world = viewmat⁻¹，
-    clip 同步 v3d，渲染分辨率 = 视口宽高。
+  - 代理相机 matrix_world = viewmat⁻¹，clip 同步 v3d，渲染分辨率 = 视口宽高；
+  - 焦距动态取 v3d.lens/2（自由透视 zoom=2.0 的等效焦距），保证渲染、相机视图
+    与自由视口三者内容像素级一致（替代早期硬编码 26.23 经验值）；
+  - 进入相机视图直接写矩阵 + 精确贴边 camzoom，不触发 camera_to_view/view_center_camera
+    的中间态 → 创建无抖动、边框贴视窗边缘。
 
 接管规则（铁律）：
   - 仅：渲染模式(RENDERED) + 合成器预览(use_compositor≠DISABLED) + 自由透视视口
   - 让位永远优先；任何不确定信号立即让位，绝不抢回
   - 只动 scene.camera 指针与渲染分辨率，永不修改用户相机/相机数据
+  - 代理相机是可选/可切换的特殊视口相机，可从大纲或 CameraHelper 相机菜单手动切入
   - F12 弹窗确认：用代理相机渲染 或 恢复用户相机+输出分辨率渲染
 
 锁定保护（2026-08-17 集成时新增，用户要求）：
@@ -27,10 +29,15 @@ from bpy.props import BoolProperty
 import os
 import traceback
 
+from .add_camera import fit_camera_frame
+
 PROXY_OBJ_NAME = "__ProxyCamera"
 PROXY_DATA_NAME = "__ProxyCamera"
 PROXY_COLLECTION = "__ProxyCameras"
 TAG = "viewport_proxy_camera"
+VIEW_CAMERA_SENSOR_WIDTH = 36.0
+# 焦距不再硬编码：自由透视视口 zoom=2.0 → 相机焦距 = v3d.lens/2（见 _view_lens）
+VIEW_CAMERA_LENS_FALLBACK = 25.0
 
 # 运行时状态
 state = {
@@ -61,6 +68,21 @@ def find_view3d():
         if area.type == 'VIEW_3D':
             return area
     return None
+
+
+def _view_lens(v3d=None):
+    """自由透视视口的等效焦距：相机焦距 = v3d.lens / 2。
+
+    BKE_camera_params_from_view3d：自由透视 params.zoom = CAMERA_PARAM_ZOOM_INIT_PERSP (2.0)，
+    相机渲染 zoom=1.0 → 相机焦距须 = v3d.lens/2 才能使渲染内容与自由视口一致
+    （numpy 验证，见 blender-npr-operations SKILL §11.5；替代早期硬编码 26.23 经验值）。
+    """
+    if v3d is None:
+        area = find_view3d()
+        v3d = area.spaces[0] if area else None
+    if v3d is not None and v3d.region_3d is not None and v3d.region_3d.is_perspective:
+        return v3d.lens / 2.0
+    return VIEW_CAMERA_LENS_FALLBACK
 
 
 def render_result_window_open():
@@ -94,19 +116,20 @@ def get_proxy_obj():
     """按名字查找代理相机对象（不创建）。"""
     obj = bpy.data.objects.get(PROXY_OBJ_NAME)
     if obj and obj.type == 'CAMERA':
+        obj.hide_select = False
         return obj
     return None
 
 
 def get_or_create_proxy(scn):
-    """创建/获取代理相机对象。"""
+    """创建/获取代理相机对象（fallback 用；主动接管优先走视口相机创建路径）。"""
     proxy = get_proxy_obj()
     if proxy is None:
         cam_data = bpy.data.cameras.new(PROXY_DATA_NAME)
         cam_data.type = 'PERSP'
         proxy = bpy.data.objects.new(PROXY_OBJ_NAME, cam_data)
         proxy[TAG] = True
-        proxy.hide_select = True      # 不可选中（不可被误操作）
+        proxy.hide_select = False     # 可从大纲/CameraHelper 菜单手动切入
         # 注意：不设 hide_viewport —— 视口 depsgraph 会排除隐藏对象，
         # 导致 Object Info 节点读不到代理相机，效果失效。
         col = bpy.data.collections.get(PROXY_COLLECTION)
@@ -117,6 +140,185 @@ def get_or_create_proxy(scn):
         if proxy.name not in col.objects:
             col.objects.link(proxy)
     return proxy
+
+
+def create_proxy_from_view_camera(scn, area):
+    """用 CameraHelper 已验证的「创建视口相机」操作生成代理相机。
+
+    这样代理相机本质上就是一个特殊视口相机：创建/贴边/进入相机视图完全复用
+    `camhp.add_camera`，之后只追加代理 TAG、集合归档和视口分辨率同步。
+    """
+    if scn is None or area is None:
+        return None
+    region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+    space = area.spaces[0] if area.spaces else None
+    rv3d = space.region_3d if space else None
+    if region is None or space is None or rv3d is None:
+        return None
+
+    # 先把渲染分辨率同步为视口尺寸，再走创建视口相机路径：
+    # 这样创建/贴边时即按最终分辨率计算，接管后不会因分辨率切换再跳一次
+    if (scn.render.resolution_x != region.width or scn.render.resolution_y != region.height or
+            scn.render.resolution_percentage != 100):
+        scn.render.resolution_x = region.width
+        scn.render.resolution_y = region.height
+        scn.render.resolution_percentage = 100
+
+    selected = [obj for obj in bpy.context.selected_objects]
+    active = bpy.context.view_layer.objects.active
+    old_proxy = get_proxy_obj()
+    if old_proxy is not None:
+        bpy.data.objects.remove(old_proxy, do_unlink=True)
+
+    before_names = {obj.name for obj in bpy.data.objects}
+    try:
+        with bpy.context.temp_override(window=bpy.context.window, screen=bpy.context.screen,
+                                       area=area, region=region, space_data=space,
+                                       region_data=rv3d):
+            bpy.ops.camhp.add_camera('EXEC_DEFAULT')
+    except Exception:
+        traceback.print_exc()
+        return None
+
+    proxy = scn.camera
+    if proxy is None or proxy.type != 'CAMERA' or proxy.name in before_names:
+        created = [obj for obj in bpy.data.objects
+                   if obj.name not in before_names and obj.type == 'CAMERA']
+        proxy = created[-1] if created else None
+    if proxy is None:
+        return None
+
+    proxy.name = PROXY_OBJ_NAME
+    proxy.data.name = PROXY_DATA_NAME
+    proxy[TAG] = True
+    proxy.hide_select = False
+    proxy.data.show_name = False
+    proxy.data.sensor_width = VIEW_CAMERA_SENSOR_WIDTH
+    proxy.data.lens = _view_lens(space)
+    _set_camera_custom_resolution(proxy.data, False)
+
+    proxy_col = _get_or_create_proxy_collection(scn)
+    if proxy.name not in proxy_col.objects:
+        proxy_col.objects.link(proxy)
+    for col in list(proxy.users_collection):
+        if col is not proxy_col:
+            try:
+                col.objects.unlink(proxy)
+            except Exception:
+                pass
+
+    scn.camera = proxy
+    try:
+        space.camera = proxy
+    except Exception:
+        pass
+
+    try:
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        for obj in selected:
+            if obj.name in bpy.data.objects:
+                obj.select_set(True)
+        if active and active.name in bpy.data.objects:
+            bpy.context.view_layer.objects.active = active
+    except Exception:
+        pass
+
+    return proxy
+
+
+def _get_or_create_proxy_collection(scn):
+    col = bpy.data.collections.get(PROXY_COLLECTION)
+    if col is None:
+        col = bpy.data.collections.new(PROXY_COLLECTION)
+        if scn.collection:
+            scn.collection.children.link(col)
+    return col
+
+
+def _camera_uses_custom_resolution(cam_data):
+    props = getattr(cam_data, 'per_camera_resolution', None)
+    return bool(props and getattr(props, 'use_custom_resolution', False))
+
+
+def _set_camera_custom_resolution(cam_data, enabled):
+    props = getattr(cam_data, 'per_camera_resolution', None)
+    if props is None:
+        return
+    try:
+        props.use_custom_resolution = enabled
+    except Exception:
+        traceback.print_exc()
+
+
+def _solidify_proxy_camera(scn, area, v3d, rv3d):
+    """用户启用代理相机的 per-camera-resolution 时，把当前视角固化为正式相机。
+
+    旧 __ProxyCamera 本身变成用户相机，保留矩阵、焦距、clip 与手动启用的相机分辨率；
+    另复制出新的干净 __ProxyCamera 留给后续自动接管使用。
+    """
+    proxy = get_proxy_obj()
+    if proxy is None or scn.camera is not proxy:
+        return False
+    if not _camera_uses_custom_resolution(proxy.data):
+        return False
+
+    user_cam = proxy
+    user_data = proxy.data
+    proxy_col = bpy.data.collections.get(PROXY_COLLECTION)
+
+    # 先复制出新的代理相机，再把旧代理改成正式相机。
+    new_proxy_data = user_data.copy()
+    new_proxy = user_cam.copy()
+    new_proxy.data = new_proxy_data
+    new_proxy[TAG] = True
+    new_proxy.hide_select = False
+    _set_camera_custom_resolution(new_proxy_data, False)
+
+    if TAG in user_cam:
+        del user_cam[TAG]
+    user_cam.hide_select = False
+    user_cam.name = "Camera"
+    user_data.name = user_cam.name
+    user_data.show_name = True
+    user_data.sensor_width = VIEW_CAMERA_SENSOR_WIDTH
+    user_data.lens = _view_lens(v3d)
+
+    new_proxy.name = PROXY_OBJ_NAME
+    new_proxy_data.name = PROXY_DATA_NAME
+    proxy_col = _get_or_create_proxy_collection(scn)
+    proxy_col.objects.link(new_proxy)
+
+    if scn.collection and user_cam.name not in scn.collection.objects:
+        scn.collection.objects.link(user_cam)
+    if proxy_col and user_cam.name in proxy_col.objects:
+        proxy_col.objects.unlink(user_cam)
+
+    scn.camera = user_cam
+    if v3d is not None:
+        v3d.lock_camera = False
+        try:
+            v3d.camera = user_cam
+        except Exception:
+            pass
+    if rv3d is not None:
+        rv3d.view_perspective = 'CAMERA'
+    if area is not None:
+        area.tag_redraw()
+
+    for obj in bpy.context.selected_objects:
+        obj.select_set(False)
+    user_cam.select_set(True)
+    bpy.context.view_layer.objects.active = user_cam
+
+    state['active'] = False
+    state['yielded'] = True
+    state['user_camera_name'] = user_cam.name
+    state['user_res'] = None
+    state['user_view'] = 'CAMERA'
+    state['render_freeze'] = False
+    bpy.context.view_layer.update()
+    return True
 
 
 def is_proxy_camera_view():
@@ -171,12 +373,49 @@ def _current_shading_key():
     return (shading.type, shading.use_compositor)
 
 
+def center_camera_view(area=None):
+    """让当前相机视图边框精确贴合视窗边缘（无 view_center_camera 的 +4px 边距）。"""
+    area = area or find_view3d()
+    if area is None:
+        return False
+    region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+    space = area.spaces[0] if area.spaces else None
+    rv3d = space.region_3d if space else None
+    if region is None or space is None or rv3d is None:
+        return False
+    fit_camera_frame(bpy.context.scene, region, rv3d)
+    return True
+
+
+def align_camera_to_view(area, camera_obj):
+    """把相机对齐到当前视口（直接写矩阵，等价 camera_to_view 但不强制切换相机视图）。"""
+    if area is None or camera_obj is None:
+        return False
+    region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+    space = area.spaces[0] if area.spaces else None
+    rv3d = space.region_3d if space else None
+    if region is None or space is None or rv3d is None:
+        return False
+
+    try:
+        space.camera = camera_obj
+    except Exception:
+        pass
+
+    if not rv3d.is_perspective:
+        return False
+    camera_obj.matrix_world = rv3d.view_matrix.inverted()
+    camera_obj.data.sensor_width = VIEW_CAMERA_SENSOR_WIDTH
+    camera_obj.data.lens = _view_lens(space)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # 接管 / 让位 / 同步
 # ---------------------------------------------------------------------------
 
 def sync_values(scn, force=False, sync_matrix=True):
-    """把代理相机参数同步到视口：matrix_world（可选）、lens/2、clip、分辨率。
+    """把代理相机参数同步到视口：matrix_world（可选）、统一焦距、clip、分辨率。
 
     仅在值实际变化（或 force）时写入。接管后矩阵由原生 lock_camera（C 层）驱动，
     sync_matrix=False 时只监控 lens/clip/分辨率（低频轮询用）。返回是否发生了写入。
@@ -201,8 +440,11 @@ def sync_values(scn, force=False, sync_matrix=True):
             proxy.matrix_world = m
             dirty = True
 
-    # 透视参数：lens/2 补偿 zoom(2.0 vs 1.0)；clip 与视口一致（Depth 反投影依赖）
-    lens = v3d.lens / 2.0
+    # 透视参数：代理/固化/普通视口相机统一 sensor/动态焦距；clip 与视口一致（Depth 反投影依赖）
+    lens = _view_lens(v3d)
+    if dirty or proxy.data.sensor_width != VIEW_CAMERA_SENSOR_WIDTH:
+        proxy.data.sensor_width = VIEW_CAMERA_SENSOR_WIDTH
+        dirty = True
     if dirty or proxy.data.lens != lens:
         proxy.data.lens = lens
         dirty = True
@@ -227,6 +469,9 @@ def sync_values(scn, force=False, sync_matrix=True):
             scn.render.resolution_y = h
             scn.render.resolution_percentage = 100
             dirty = True
+        if dirty:
+            # 分辨率/焦距变化后重贴边：相机视图边框始终铺满视窗（视窗 resize 时也生效）
+            fit_camera_frame(scn, region, rv3d)
     return dirty
 
 
@@ -242,7 +487,7 @@ def sync(scn, force=False):
 
 
 def acquire(scn):
-    """接管：记录用户状态 → 创建代理 → 对齐视口 → 切相机视图 + 原生 lock_camera。
+    """接管：记录用户状态 → 创建特殊视口相机作为代理 → 原生 lock_camera。
 
     之后相机矩阵由 Blender 原生 lock_camera（C 层）在视口导航时直接驱动，
     零 Python 同步开销、零滞后（解决轮询/每帧 Python 同步卡顿）。
@@ -263,21 +508,33 @@ def acquire(scn):
         scn.render.resolution_percentage,
     )
     state['user_view'] = rv3d.view_perspective
-    state['active'] = True
-    state['yielded'] = False
-    # sync_values 是纯值同步不创建代理，接管时必须先显式创建
-    proxy = get_or_create_proxy(scn)
-    # ⚠️ 必须把 scene.camera 切到代理：否则下一个 tick 的 active 分支会因
-    # "scn.camera is not proxy" 立即让位，接管在 0.1s 内失效（视图反复横跳=卡顿）。
+
+    # 代理相机直接从 CameraHelper「创建视口相机」生成，再打 TAG 变成特殊代理相机。
+    # 这条路径已由用户验证为无抖、贴边；代理层只接管分辨率/锁定/让位状态。
+    proxy = create_proxy_from_view_camera(scn, area)
+    created_from_view_camera = proxy is not None
+    if proxy is None:
+        proxy = get_or_create_proxy(scn)
+        aligned = align_camera_to_view(area, proxy)
+        sync_values(scn, force=True, sync_matrix=not aligned)
+    else:
+        sync_values(scn, force=True, sync_matrix=False)
+
     if scn.camera is not proxy:
         scn.camera = proxy
-    # 先把代理对齐到当前视口（matrix=viewmat⁻¹ + lens/2 + clip + res）
-    sync_values(scn, force=True, sync_matrix=True)
+    try:
+        v3d.camera = proxy
+    except Exception:
+        pass
     # 进入相机视图 + 锁定：视口视角 = 代理相机视角（无缝切换），漫游由 C 层驱动相机
     rv3d.view_perspective = 'CAMERA'
+    if not created_from_view_camera:
+        center_camera_view(area)
     # 🔒 渲染图窗口打开时禁止上锁（否则 tick 下一轮强制关锁，锁图标闪烁）
     if not lock_blocked():
         v3d.lock_camera = True
+    state['active'] = True
+    state['yielded'] = False
     bpy.context.view_layer.update()
 
 
@@ -417,6 +674,8 @@ def tick():
                     rv3d.view_perspective != 'CAMERA'):
                 release(scn)
                 state['yielded'] = True
+            elif _solidify_proxy_camera(scn, area, v3d, rv3d):
+                return 0.1
             else:
                 # 低频监控：视口 resize / lens / clip 变化时更新代理参数
                 sync_values(scn, sync_matrix=False)
@@ -719,11 +978,12 @@ def register():
             default=True,
             update=_on_proxy_camera_enabled,
         )
-        # 防重复：addon 被重复 register（如 reload）时避免面板按钮/handler 重复。
-        # 注意：面板从未被附加过函数时 draw 没有 _draw_funcs 属性，必须用 getattr 兜底。
-        _df = getattr(bpy.types.VIEW3D_PT_shading_compositor.draw, '_draw_funcs', ())
-        if _shading_panel_draw not in _df:
-            bpy.types.VIEW3D_PT_shading_compositor.append(_shading_panel_draw)
+        # 2026-08-19：代理相机可从大纲或 CameraHelper 相机菜单手动切入，
+        # 不再把开关绘制到「视图着色方式」弹窗。
+        try:
+            bpy.types.VIEW3D_PT_shading_compositor.remove(_shading_panel_draw)
+        except Exception:
+            pass
         for _handlers, _cb in ((bpy.app.handlers.render_pre, render_pre_cb),
                                (bpy.app.handlers.render_post, render_post_cb),
                                (bpy.app.handlers.save_pre, save_pre_cb),

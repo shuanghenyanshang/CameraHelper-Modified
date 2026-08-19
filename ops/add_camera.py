@@ -39,40 +39,42 @@ class AddCamera(bpy.types.Operator):
             return self._create_proxy_camera(context)
         has_camera = any(o.type == 'CAMERA' for o in context.scene.objects)
         if not has_camera and event.ctrl:
-            return self.execute(context)
+            return self._execute_with_report(context)
         elif event.ctrl:
             bpy.ops.camhp.add_motion_cams('INVOKE_DEFAULT')
             bpy.ops.ed.undo_push()
             return {'FINISHED'}
         else:
-            return self.execute(context)
+            return self._execute_with_report(context)
+
+    def _execute_with_report(self, context):
+        ret = self.execute(context)
+        if ret == {'FINISHED'}:
+            self.report({'INFO'}, "已创建相机")
+        return ret
 
     def _create_proxy_camera(self, context):
-        from .viewport_proxy import acquire, create_proxy_from_view_camera, state
+        from .viewport_proxy import acquire, get_proxy_obj
 
-        scn = context.scene
         area = context.area
         v3d = context.space_data
         rv3d = v3d.region_3d if v3d else None
         if rv3d is None or not rv3d.is_perspective:
-            self.report({'WARNING'}, "代理相机需在透视视口下创建（正交视口不支持接管）")
+            self.report({'WARNING'}, "代理相机创建失败：需在透视视口下创建（正交视口不支持接管）")
             return {'CANCELLED'}
-        if state['active']:
-            self.report({'INFO'}, "视口代理相机已在接管中")
-            return {'FINISHED'}
-        preview = (getattr(scn, 'proxy_camera_enabled', False) and
-                   v3d.shading.type == 'RENDERED' and
-                   v3d.shading.use_compositor == 'ALWAYS')
-        if preview:
-            # 满足接管条件 → 完整接管（创建代理 + 设 scene.camera + 相机视图 + lock_camera）
-            acquire(scn, area)
-        else:
-            # 未满足接管条件（如自由视口非渲染模式）→ 仅创建代理相机并进入其相机视图，
-            # 切换条件满足后由 tick 状态机自动接管
-            proxy = create_proxy_from_view_camera(scn, area)
-            if proxy is None:
-                self.report({'ERROR'}, "代理相机创建失败")
-                return {'CANCELLED'}
+        # 接管条件分级提示：渲染模式 + 合成器预览-总是
+        if v3d.shading.type != 'RENDERED':
+            self.report({'WARNING'}, "代理相机创建失败：需要处于渲染模式且开启合成器预览-总是")
+            return {'CANCELLED'}
+        if v3d.shading.use_compositor != 'ALWAYS':
+            self.report({'WARNING'}, "代理相机创建失败：当前已处于渲染模式，还需开启合成器预览-总是")
+            return {'CANCELLED'}
+        # 已接管/未接管统一走 acquire（已接管时内部直接返回，代理仍存在，不重复创建）
+        acquire(context.scene, area)
+        if get_proxy_obj() is None:
+            self.report({'ERROR'}, "代理相机创建失败")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "已创建代理相机")
         return {'FINISHED'}
 
     def execute(self, context):

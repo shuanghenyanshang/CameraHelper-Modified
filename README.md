@@ -1,33 +1,40 @@
 # Camera Helper 修改版
 
-为 Blender 快速创建视口相机、运动相机及相机切换的工具。在原 Camera Helper 基础上维护改进。
+快速创建、切换和预览相机，让运动相机沿路径继承画面参数。
 
-**[⬇ 下载可安装 ZIP](https://github.com/shuanghenyanshang/CameraHelper-Modified/releases/download/v1.4.2-motion-inherit-r2-20261114/CameraHelper-1.4.2-motion-inherit-R2.zip)** · [发布说明](https://github.com/shuanghenyanshang/CameraHelper-Modified/releases/tag/v1.4.2-motion-inherit-r2-20261114)
+**[下载可安装 ZIP](https://github.com/shuanghenyanshang/CameraHelper-Modified/releases/download/v1.4.2-motion-inherit-r2-20261114/CameraHelper-1.4.2-motion-inherit-R2.zip)** · [更多更新与演示](https://github.com/shuanghenyanshang/CameraHelper-Modified/releases/tag/v1.4.2-motion-inherit-r2-20261114)
 
-## 新增与改进
+下载后在 Blender 扩展菜单选择“从磁盘安装”，启用 **Camera Helper**。
 
-- **运动相机继承画面参数**：沿路径动态继承来源相机的焦距、镜头位移、景深等，默认开启；关闭后保留当前值，可手动调整。
-- 匹配真实非等距及闭合路径；来源改参、关键帧和时间轴切换动态生效。离散类型在段中点切换。
-- 已有运动路径自动兼容，保留原开关和偏移；不改写来源相机数据，不需要手工追加资源或接线。
-- 兼容官方 Blender 的新旧修改器输入 API；修复开关置灰、注册时机及路径绘制 shader 名称。
-- 同步此前的代理相机偏好开关（默认关闭）、创建前后视图对齐和普通相机保持输出分辨率等改进。
+## 日常使用
 
-## 安装与使用
+- **创建相机**：点击创建按钮，保留当前取景和输出设置。
+- **运动路径**：Ctrl 点击创建按钮，按顺序选择来源相机，右键结束。
+- **画面参数继承**：在 **Controller → MotionCamera → 调整** 中启停。默认沿路径继承焦距、镜头位移和景深，关闭后保留当前值，可手动调整。
+- **切换与预览**：通过相机按钮切换取景，或开启缩略图预览。
 
-1. 下载上方 ZIP，在 Blender 偏好设置的扩展菜单中选择“从磁盘安装”，安装并启用 **Camera Helper**。
-2. 按住 **Ctrl** 点击原创建相机按钮，按顺序选择来源相机，右键结束。
-3. 选中 **Controller**，在 **MotionCamera → 调整 → 继承画面参数** 中启停继承。
+![运动相机动态继承画面参数](media/motion-inherit.gif)
 
-普通点击创建当前视角相机；代理功能需先在插件偏好中启用，Shift 点击可创建代理相机。
+<details>
+<summary>上游基础演示：创建相机 → 运动路径 → 修改器调整</summary>
 
-## 兼容与验证
+以下三张演示来自 [上游 README](https://github.com/AIGODLIKE/CameraHelper)。
 
-已实际验证官方 **Blender 5.0.0**、官方 **5.2.0 Alpha** 及 **NPR 5.2** 的创建、来源绑定、动态参数、保存重开与运动保持；官方 5.0 另有 Cycles 图像对照，当前工程的开关已获用户点击确认。官方完整 GUI 模态创建/GPU 绘制、悬停和任意窄栏未全部独立验收；其他宿主版本未作同等实测。
+创建相机：
+
+![上游：创建相机](https://github.com/user-attachments/assets/ba16cdda-3ca2-4c11-91bd-7639b3491189)
+
+Ctrl 按序创建运动路径：
+
+![上游：创建运动路径](https://github.com/user-attachments/assets/8c99727a-5533-4255-a221-e34e52584c5d)
+
+修改器调整：
+
+![上游：修改器调整](https://github.com/user-attachments/assets/16d6af5f-c6e9-4f71-9a1d-67672a2708fd)
+
+</details>
 
 
+## 来源与协议
 
-## 来源与开源协议
-
-本仓库是 **[AIGODLIKE/CameraHelper](https://github.com/AIGODLIKE/CameraHelper)** 的本地修改版。原作者：**ACGGIT、Atticus、小萌新**。
-
-上游 [manifest 的实际许可声明](https://github.com/AIGODLIKE/CameraHelper/blob/35b2c3d9bff279f4bad9112a4481b30cddab6b48/blender_manifest.toml) 为 **GPL-3.0-or-later**，本仓库保持该许可及原作者声明，并补充标准 [LICENSE](LICENSE)。来源、文件身份与本地修改范围详见 [NOTICE](NOTICE.md)。
+基于 **[AIGODLIKE/CameraHelper](https://github.com/AIGODLIKE/CameraHelper)**，原作者 **ACGGIT、Atticus、小萌新**。本仓库为本地修改版，沿用 **[GPL-3.0-or-later](LICENSE)**；来源与修改范围见 [NOTICE](NOTICE.md)。

@@ -10,6 +10,7 @@ from ..old.draw_utils.bl_ui_drag_panel import BL_UI_Drag_Panel
 from ..old.draw_utils.bl_ui_draw_op import BL_UI_OT_draw_operator
 from ..old.draw_utils.bl_ui_label import BL_UI_Label
 from ...utils.asset import AssetDir, get_asset_dir
+from .inherit import ensure_group, set_socket_value
 
 
 def get_obj_2d_loc(obj, context):
@@ -113,7 +114,10 @@ class CAMHP_PT_add_motion_cams(BL_UI_OT_draw_operator, bpy.types.Operator):
         self.panel.set_location(context.area.width * 0.8,
                                 context.area.height * 1)
 
-        # 创建相机
+        self._create_motion_rig(context)
+
+    def _create_motion_rig(self, context):
+        # Shared creation path for the UI and host-side verification.
         cam_data = bpy.data.cameras.new(name='Camera')
         cam_obj = bpy.data.objects.new('Camera', cam_data)
 
@@ -126,11 +130,15 @@ class CAMHP_PT_add_motion_cams(BL_UI_OT_draw_operator, bpy.types.Operator):
                                       filepath=str(asset_motioncam))
         asset_motion_gen = load_asset(name='MotionCamera', asset_type='node_groups',
                                       filepath=str(asset_motioncam))
+        ensure_group(asset_motion_gen)
 
         context.collection.objects.link(cam_obj)
         context.collection.objects.link(controller_obj)
         # 设置
-        cam_obj.data.show_name = True
+        if hasattr(cam_obj.data, 'show_name'):
+            cam_obj.data.show_name = True
+        else:
+            cam_obj.show_name = True
         cam_obj.name = 'Motion Camera'
         # deselect all
         bpy.ops.object.select_all(action='DESELECT')
@@ -156,25 +164,13 @@ class CAMHP_PT_add_motion_cams(BL_UI_OT_draw_operator, bpy.types.Operator):
                     continue
             elif hasattr(item, 'in_out') and item.in_out == 'OUTPUT':
                 continue
-            if hasattr(item, 'socket_type') and item.socket_type == socket_type:
+            if hasattr(item, 'socket_type') and item.socket_type in {socket_type, 'NodeSocket' + socket_type.title()}:
                 return item.identifier
         return None
 
     def _set_modifier_socket_value(self, mod, socket_id, value):
-        """设置修改器socket的值，兼容Blender 5.x的新API"""
-        if bpy.app.version >= (5, 0, 0):
-            # Blender 5.x: mod.properties.inputs.<socket_id>.value = value
-            try:
-                sock = getattr(mod.properties.inputs, socket_id)
-                sock.value = value
-                return
-            except Exception:
-                pass
-        # Fallback: old API (Blender 4.x) - direct IDProperty access
-        try:
-            mod[socket_id] = value
-        except Exception:
-            pass
+        """Use the host's actual modifier API for source binding."""
+        set_socket_value(mod, socket_id, value)
 
     def add_motion_cam(self, obj):
         bpy.context.view_layer.objects.active = self.controller
@@ -244,7 +240,7 @@ class CAMHP_PT_add_motion_cams(BL_UI_OT_draw_operator, bpy.types.Operator):
         if not points_2d:
             return
 
-        shader = gpu.shader.from_builtin('2D_UNIFORM_COLOR')
+        shader = gpu.shader.from_builtin('UNIFORM_COLOR')
         gpu.state.blend_set('ALPHA')
 
         # ---------- 虚线连接线（选中的相机之间） ----------

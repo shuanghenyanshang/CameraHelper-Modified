@@ -29,7 +29,8 @@ from bpy.props import BoolProperty
 import os
 import traceback
 
-from .add_camera import fit_camera_frame
+from .add_camera import fit_camera_frame, create_view_camera, camera_frame_zoom_factor
+from .. import __package__ as base_package
 
 PROXY_OBJ_NAME = "__ProxyCamera"
 PROXY_DATA_NAME = "__ProxyCamera"
@@ -42,6 +43,8 @@ VIEW_CAMERA_LENS_FALLBACK = 25.0
 # 运行时状态
 state = {
     'active': False,             # 接管中
+    'owner_scene': None,
+    'owner_area': None,
     'yielded': False,            # 让位中（等待用户明确回到预览状态）
     'user_camera_name': None,    # 接管前用户相机名
     'user_res': None,            # 接管前 (x, y, percentage)
@@ -53,6 +56,45 @@ state = {
 
 # addon keyconfig 中注册的 F12 keymap item（卸载时移除）
 _f12_kmi = None
+_registered = False
+
+
+def feature_enabled():
+    addon = bpy.context.preferences.addons.get(base_package)
+    return bool(addon and getattr(addon.preferences, 'enable_viewport_proxy', False))
+
+
+def apply_preference():
+    """偏好开关统一控制自动监控、保存/渲染钩子和 F12；关闭不删除相机数据。"""
+    if not _registered:
+        return
+    enabled = feature_enabled()
+    if not enabled:
+        scn = state['owner_scene'] or getattr(bpy.context, 'scene', None)
+        if state['active'] and scn is not None:
+            release(scn)
+        state['yielded'] = False
+        state['rendering'] = False
+        state['render_freeze'] = False
+        if bpy.app.timers.is_registered(tick):
+            bpy.app.timers.unregister(tick)
+        if _f12_kmi is not None:
+            _restore_f12()
+    for handlers, callback in (
+            (bpy.app.handlers.render_pre, render_pre_cb),
+            (bpy.app.handlers.render_post, render_post_cb),
+            (bpy.app.handlers.save_pre, save_pre_cb),
+            (bpy.app.handlers.depsgraph_update_post, depsgraph_post_cb)):
+        if enabled and callback not in handlers:
+            handlers.append(callback)
+        elif not enabled and callback in handlers:
+            handlers.remove(callback)
+    if enabled:
+        state['yielded'] = False
+        if _f12_kmi is None:
+            _setup_f12()
+        if not bpy.app.timers.is_registered(tick):
+            bpy.app.timers.register(tick, persistent=True)
 
 
 # ---------------------------------------------------------------------------
@@ -71,17 +113,15 @@ def find_view3d():
 
 
 def _view_lens(v3d=None):
-    """自由透视视口的等效焦距：相机焦距 = v3d.lens / 2。
-
-    BKE_camera_params_from_view3d：自由透视 params.zoom = CAMERA_PARAM_ZOOM_INIT_PERSP (2.0)，
-    相机渲染 zoom=1.0 → 相机焦距须 = v3d.lens/2 才能使渲染内容与自由视口一致
-    （numpy 验证，见 blender-npr-operations SKILL §11.5；替代早期硬编码 26.23 经验值）。
-    """
+    """与普通视口相机共用投影补偿；同宽高比、方形像素时等于 v3d.lens/2。"""
     if v3d is None:
         area = find_view3d()
         v3d = area.spaces[0] if area else None
     if v3d is not None and v3d.region_3d is not None and v3d.region_3d.is_perspective:
-        return v3d.lens / 2.0
+        area = find_view3d()
+        region = next((r for r in area.regions if r.type == 'WINDOW'), None) if area else None
+        fac = camera_frame_zoom_factor(bpy.context.scene, region)
+        return v3d.lens / (2.0 * fac)
     return VIEW_CAMERA_LENS_FALLBACK
 
 
@@ -146,7 +186,7 @@ def create_proxy_from_view_camera(scn, area):
     """用 CameraHelper 已验证的「创建视口相机」操作生成代理相机。
 
     这样代理相机本质上就是一个特殊视口相机：创建/贴边/进入相机视图完全复用
-    `camhp.add_camera`，之后只追加代理 TAG、集合归档和视口分辨率同步。
+    `create_view_camera`，之后只追加代理 TAG、集合归档和视口分辨率同步。
     """
     if scn is None or area is None:
         return None
@@ -175,7 +215,7 @@ def create_proxy_from_view_camera(scn, area):
         with bpy.context.temp_override(window=bpy.context.window, screen=bpy.context.screen,
                                        area=area, region=region, space_data=space,
                                        region_data=rv3d):
-            bpy.ops.camhp.add_camera('EXEC_DEFAULT')
+            create_view_camera(bpy.context, proxy=True)
     except Exception:
         traceback.print_exc()
         return None
@@ -358,7 +398,7 @@ def lock_blocked():
     易误操作，渲染图窗口打开时需强制解锁并禁止手动启用，降低误操作风险。
     不依赖 state['active']：用户手动切到代理相机视图（合成器 CAMERA 模式）也覆盖。
     """
-    if not render_result_window_open():
+    if not feature_enabled() or not render_result_window_open():
         return False
     if not is_proxy_camera_view():
         return False
@@ -420,6 +460,8 @@ def sync_values(scn, force=False, sync_matrix=True):
     仅在值实际变化（或 force）时写入。接管后矩阵由原生 lock_camera（C 层）驱动，
     sync_matrix=False 时只监控 lens/clip/分辨率（低频轮询用）。返回是否发生了写入。
     """
+    if not feature_enabled():
+        return False
     area = find_view3d()
     if not area:
         return False
@@ -432,6 +474,17 @@ def sync_values(scn, force=False, sync_matrix=True):
         return False
 
     dirty = force
+
+    # 先更新代理专属输出尺寸，再计算相机框和焦距，避免 resize 时使用上一帧比例。
+    region = next((r for r in area.regions if r.type == 'WINDOW'), None)
+    if region:
+        w, h = region.width, region.height
+        if (scn.render.resolution_x != w or scn.render.resolution_y != h or
+                scn.render.resolution_percentage != 100):
+            scn.render.resolution_x = w
+            scn.render.resolution_y = h
+            scn.render.resolution_percentage = 100
+            dirty = True
 
     if sync_matrix:
         # 矩阵：view 矩阵取逆 = 相机 world 矩阵（仅接管对齐时写一次）
@@ -456,19 +509,7 @@ def sync_values(scn, force=False, sync_matrix=True):
         dirty = True
 
     # 分辨率：视口宽高（Camera Info 用 scene.r.xsch/ysch 算投影矩阵，须与视口 winmat 一致）
-    region = None
-    for r in area.regions:
-        if r.type == 'WINDOW':
-            region = r
-            break
     if region:
-        w, h = region.width, region.height
-        if (dirty or scn.render.resolution_x != w or scn.render.resolution_y != h or
-                scn.render.resolution_percentage != 100):
-            scn.render.resolution_x = w
-            scn.render.resolution_y = h
-            scn.render.resolution_percentage = 100
-            dirty = True
         if dirty:
             # 分辨率/焦距变化后重贴边：相机视图边框始终铺满视窗（视窗 resize 时也生效）
             fit_camera_frame(scn, region, rv3d)
@@ -478,6 +519,8 @@ def sync_values(scn, force=False, sync_matrix=True):
 def sync(scn, force=False):
     """完整同步：值（不重写矩阵，矩阵归 lock_camera）+ scene.camera + 立即 depsgraph 更新
     （渲染恢复时用）。"""
+    if not feature_enabled():
+        return
     dirty = sync_values(scn, force, sync_matrix=False)
     if dirty:
         proxy = get_proxy_obj()
@@ -494,7 +537,7 @@ def acquire(scn, area=None):
     area 参数：手动创建代理相机（Shift+左键）时传入按钮所在 area，
     避免多视口下 find_view3d 误选第一个视口。
     """
-    if state['active']:
+    if not feature_enabled() or state['active']:
         return
     area = area or find_view3d()
     if not area:
@@ -504,6 +547,8 @@ def acquire(scn, area=None):
     if rv3d is None:
         return
     state['user_camera_name'] = scn.camera.name if scn.camera else None
+    state['owner_scene'] = scn
+    state['owner_area'] = area
     state['user_res'] = (
         scn.render.resolution_x,
         scn.render.resolution_y,
@@ -549,7 +594,9 @@ def release(scn):
     """
     if not state['active']:
         return
-    area = find_view3d()
+    scn = state['owner_scene'] or scn
+    area = next((a for w in bpy.context.window_manager.windows
+                 for a in w.screen.areas if a == state['owner_area']), None) or find_view3d()
     if area:
         v3d = area.spaces[0]
         rv3d = v3d.region_3d
@@ -567,6 +614,8 @@ def release(scn):
          scn.render.resolution_y,
          scn.render.resolution_percentage) = state['user_res']
     state['active'] = False
+    state['owner_scene'] = None
+    state['owner_area'] = None
     state['user_camera_name'] = None
     state['user_res'] = None
     state['user_view'] = None
@@ -596,6 +645,8 @@ def tick():
     渲染图窗口打开时的强制解锁（lock_blocked）。
     """
     try:
+        if not feature_enabled():
+            return None
         scn = bpy.context.scene
         if scn is None:
             return 0.1
@@ -661,6 +712,8 @@ def tick():
                 if state['user_view'] is None:
                     state['user_view'] = 'CAMERA'
                 state['active'] = True
+                state['owner_scene'] = scn
+                state['owner_area'] = area
                 if not v3d.lock_camera and not lock_blocked():
                     v3d.lock_camera = True
                     bpy.context.view_layer.update()
@@ -748,7 +801,7 @@ class VIEWPORT_PROXY_OT_render(bpy.types.Operator):
 
     def invoke(self, context, event):
         scn = context.scene
-        if not (state['active'] and scn.camera is get_proxy_obj()):
+        if not (feature_enabled() and state['active'] and scn.camera is get_proxy_obj()):
             bpy.ops.render.render('INVOKE_DEFAULT')
             return {'FINISHED'}
         # 弹窗确认：用 wm.call_menu（菜单机制，与右键菜单同类，规避 3D 视口 +
@@ -774,6 +827,8 @@ class VIEWPORT_PROXY_OT_render_with_proxy(bpy.types.Operator):
     bl_label = "Render with Proxy Camera"
 
     def execute(self, context):
+        if not feature_enabled():
+            return {'CANCELLED'}
         # 立即强制关锁：F12 渲染开始时就关闭 lock_camera，
         # 避免渲染过程中弹窗打开时合成器回写 Render Result
         area = find_view3d()
@@ -851,7 +906,7 @@ def _on_proxy_camera_enabled(self, context):
         scn = context.scene if context else bpy.context.scene
         if scn is None:
             return
-        enabled = getattr(scn, 'proxy_camera_enabled', True)
+        enabled = feature_enabled() and getattr(scn, 'proxy_camera_enabled', True)
         if not enabled:
             # 关闭 → 让位（清理一切接管状态）
             if state['active']:
@@ -971,6 +1026,7 @@ _classes = (
 
 
 def register():
+    global _registered
     try:
         for cls in _classes:
             bpy.utils.register_class(cls)
@@ -986,27 +1042,23 @@ def register():
             bpy.types.VIEW3D_PT_shading_compositor.remove(_shading_panel_draw)
         except Exception:
             pass
-        for _handlers, _cb in ((bpy.app.handlers.render_pre, render_pre_cb),
-                               (bpy.app.handlers.render_post, render_post_cb),
-                               (bpy.app.handlers.save_pre, save_pre_cb),
-                               (bpy.app.handlers.depsgraph_update_post, depsgraph_post_cb)):
-            if _cb not in _handlers:
-                _handlers.append(_cb)
-        _setup_f12()
-        if bpy.app.timers.is_registered(tick) is False:
-            bpy.app.timers.register(tick, persistent=True)
+        _registered = True
+        apply_preference()
     except Exception:
         traceback.print_exc()
 
 
 def unregister():
+    global _registered
+    _registered = False
     try:
         # 卸载前先让位并清理代理对象，避免 scene.camera 卡在代理 / 残留进 .blend
         scn = bpy.context.scene
         if scn is not None:
             if state['active']:
                 release(scn)
-            cleanup_proxy_objects()
+            if feature_enabled():
+                cleanup_proxy_objects()
         if bpy.app.timers.is_registered(tick):
             bpy.app.timers.unregister(tick)
         _restore_f12()

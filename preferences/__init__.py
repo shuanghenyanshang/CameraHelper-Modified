@@ -40,8 +40,22 @@ class CameraThumb(bpy.types.PropertyGroup):
     ], default='TOP_LEFT')
 
 
+def _update_viewport_proxy(self, context):
+    from ..ops import viewport_proxy
+    viewport_proxy.apply_preference()
+
+
 class CAMHP_Preference(bpy.types.AddonPreferences):
     bl_idname = base_package
+
+    enable_viewport_proxy: BoolProperty(
+        name="代理相机",
+        description="启用合成器视口预览使用的代理相机；渲染模式且合成器预览为总是时自动接管，"
+                    "也可用 Shift 点击创建相机。仅代理相机使用视口分辨率，普通点击保留设置好的输出分辨率。关闭后退出接管、恢复原相机和输出分辨率，"
+                    "停止自动监控和 F12 接管，保留已有相机数据",
+        default=False,
+        update=_update_viewport_proxy,
+    )
 
 
     gz_motion_camera: PointerProperty(type=GizmoMotionCamera)
@@ -58,6 +72,9 @@ class CAMHP_Preference(bpy.types.AddonPreferences):
     def draw_settings(self, context, layout):
         col = layout.column()
         col.use_property_split = True
+
+        col.prop(self, 'enable_viewport_proxy')
+        col.separator()
 
         box = col.box().column(align=True)
         box.label(text='Motion Camera', icon='GIZMO')
@@ -91,6 +108,7 @@ def register():
     bpy.utils.register_class(DrawMotionCurve)
     bpy.utils.register_class(CameraThumb)
     bpy.utils.register_class(CAMHP_Preference)
+    _update_viewport_proxy(None, bpy.context)
 
 
 def unregister():

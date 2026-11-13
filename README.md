@@ -26,8 +26,8 @@
 
 安装包保留已验证的产品文件；仓库 README 和 CHANGELOG 是公开项目说明，与包内技术文档有所不同，功能代码及资源一致。
 
-## 原作与许可
+## 来源与开源协议
 
-原作者：**ACGGIT、Atticus、小萌新**。基于 [AIGODLIKE/CameraHelper](https://github.com/AIGODLIKE/CameraHelper) 维护修改。
+本仓库是 **[AIGODLIKE/CameraHelper](https://github.com/AIGODLIKE/CameraHelper)** 的本地修改版。原作者：**ACGGIT、Atticus、小萌新**。
 
-本项目采用 **GPL-3.0-or-later**，见 [LICENSE](LICENSE)。
+上游 [manifest 的实际许可声明](https://github.com/AIGODLIKE/CameraHelper/blob/35b2c3d9bff279f4bad9112a4481b30cddab6b48/blender_manifest.toml) 为 **GPL-3.0-or-later**，本仓库保持该许可及原作者声明，并补充标准 [LICENSE](LICENSE)。来源、文件身份与本地修改范围详见 [NOTICE](NOTICE.md)。
